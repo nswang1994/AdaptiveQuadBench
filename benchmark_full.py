@@ -14,7 +14,7 @@ Cases:
   C10: LGVI + BEM  + LIEKF @ 500 Hz
 
 Controllers: SE3, Geo, GeoAdaptive, L1-Geo, INDI
-Trajectory : circular r=2m, wind = [3,0,0] m/s, T = 15 s
+Trajectory : circular r=2m, T = 15 s
 """
 
 import sys, os, copy, time as timer, traceback, json
@@ -28,11 +28,10 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, 'rotorpy'))
 sys.path.insert(0, os.path.join(ROOT, 'controller'))
 
+from sim_config import get_config, make_wind, make_sensors, NullEstimator
+
 from rotorpy.vehicles.multirotor import Multirotor
 from rotorpy.trajectories.circular_traj import CircularTraj
-from rotorpy.wind.default_winds import ConstantWind
-from rotorpy.sensors.imu import Imu
-from rotorpy.sensors.external_mocap import MotionCapture
 from rotorpy.simulate import simulate
 from rotorpy.world import World
 from rotorpy.estimators.liekf_ins import LIEKFINS
@@ -47,30 +46,35 @@ from quad_param.quadrotor import quad_params as std_params
 from quad_param.quadrotor_with_bem import quad_params as bem_params
 
 # =====================================================================
-#  Configuration
+#  Configuration  ← edit here
 # =====================================================================
-T_FINAL  = 15
-RADIUS   = 2.0
-WIND_VEC = np.array([3.0, 0.0, 0.0])
+cfg = get_config(
+    t_final         = 15,
+    radius          = 2.0,
+
+    # Wind
+    wind_mode       = 'constant',   # 'nowind' | 'constant' | 'turbulent' | 'cfd'
+    wind_vec        = [3.0, 0.0, 0.0],
+    turb_mean       = [3.0, 0.0, 0.0],
+    turb_std        = [1.5, 0.6, 0.4],
+    turb_tau        = 3.5,
+    turb_seed       = 0,
+    cfd_file        = '/wind field/2019/case6_highTi_UWV_10min_bin1.nc',
+    cfd_wake        = 10.0,
+    cfd_unit        = 'R',
+    cfd_lateral     = 0.0,
+    cfd_t_offset    = 0.0,
+
+    results_dir     = os.path.join(ROOT, 'results', 'benchmark'),
+)
+
+RESULTS_DIR = cfg.results_dir
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+wind_profile = make_wind(cfg)
+print(f"[benchmark] Wind mode: {cfg.wind_mode}")
 
 world = World.empty((-10, 10, -10, 10, -10, 10))
-wind_profile = ConstantWind(*WIND_VEC)
-
-mocap_params = {
-    'pos_noise_density':  0.0005 * np.ones(3),
-    'vel_noise_density':  0.0010 * np.ones(3),
-    'att_noise_density':  0.0005 * np.ones(3),
-    'rate_noise_density': 0.0005 * np.ones(3),
-    'vel_artifact_max': 5, 'vel_artifact_prob': 0.001,
-    'rate_artifact_max': 1, 'rate_artifact_prob': 0.0002
-}
-
-class NullEstimator:
-    """Placeholder when not using a real estimator."""
-    def step(self, *a, **kw):
-        return {'filter_state': np.zeros(1), 'covariance': np.zeros(1)}
-    def get_state_estimate(self):
-        return {}
 
 # =====================================================================
 #  Case definitions
@@ -96,7 +100,7 @@ def get_params(key):
 
 def make_x0(params):
     hover_omega = np.sqrt(params['mass'] * 9.81 / (4 * params['k_eta']))
-    return {'x': np.array([RADIUS, 0, 0]),
+    return {'x': np.array([cfg.radius, 0, 0]),
             'v': np.zeros(3),
             'q': np.array([0, 0, 0, 1]),
             'w': np.zeros(3),
@@ -143,9 +147,8 @@ for case_label, integrator, params_key, est_type, rate in CASES:
                                  integrator=integrator)
             vehicle.initial_state = copy.deepcopy(x0)
 
-            imu_s = Imu(p_BS=np.zeros(3), R_BS=np.eye(3), sampling_rate=rate)
-            mc_s = MotionCapture(sampling_rate=rate, mocap_params=mocap_params,
-                                 with_artifacts=False)
+            case_cfg = get_config(**{**cfg, 'sim_rate': rate})
+            imu_s, mc_s = make_sensors(case_cfg)
 
             use_est = (est_type == 'liekf')
             est = LIEKFINS(params, dt=dt) if use_est else NullEstimator()
@@ -154,9 +157,9 @@ for case_label, integrator, params_key, est_type, rate in CASES:
             t0 = timer.perf_counter()
             result_tuple = simulate(
                 world, copy.deepcopy(x0), vehicle, ctrl,
-                CircularTraj(radius=RADIUS), wind_profile,
+                CircularTraj(radius=cfg.radius), wind_profile,
                 imu_s, mc_s, est,
-                T_FINAL, dt, safety_margin=0.25,
+                cfg.t_final, dt, safety_margin=0.25,
                 use_mocap=False, use_estimator=use_est)
             wall = timer.perf_counter() - t0
 
@@ -231,7 +234,7 @@ print("=" * 110)
 # =====================================================================
 #  Save JSON summary
 # =====================================================================
-json_path = os.path.join(ROOT, 'benchmark_summary.json')
+json_path = os.path.join(RESULTS_DIR, 'benchmark_summary.json')
 with open(json_path, 'w') as f:
     json.dump(summary_data, f, indent=2, default=str)
 print(f"\nJSON summary saved to: {json_path}")
@@ -296,7 +299,7 @@ cbar = plt.colorbar(im, ax=ax, shrink=0.8)
 cbar.set_label('Tracking Error [m]', fontsize=10)
 
 plt.tight_layout()
-out_path = os.path.join(ROOT, 'benchmark_full_heatmap.png')
+out_path = os.path.join(RESULTS_DIR, 'benchmark_full_heatmap.png')
 plt.savefig(out_path, dpi=150)
 print(f"Heatmap saved to: {out_path}")
 
@@ -342,7 +345,7 @@ for j, cn in enumerate(CTRL_NAMES):
         ax.set_ylabel('Tracking Error [m]')
 
 plt.tight_layout()
-out_path2 = os.path.join(ROOT, 'benchmark_full_bars.png')
+out_path2 = os.path.join(RESULTS_DIR, 'benchmark_full_bars.png')
 plt.savefig(out_path2, dpi=150)
 print(f"Bar chart saved to: {out_path2}")
 

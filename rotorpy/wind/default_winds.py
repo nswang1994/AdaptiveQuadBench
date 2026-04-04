@@ -176,6 +176,92 @@ class LadderWind(object):
 
         return np.array([self.wx, self.wy, self.wz])
     
+class TurbulentWind(object):
+    """
+    Mean wind plus first-order Gauss-Markov (colored-noise) turbulence.
+
+    Each velocity component follows an Ornstein-Uhlenbeck process:
+
+        w[k+1] = mean + α·(w[k] - mean) + sqrt(1-α²)·σ·ξ[k]
+
+    where  α = exp(-Δt / τ),  τ = correlation time,  ξ ~ N(0,1).
+
+    This reproduces the correct steady-state variance σ² and
+    exponential autocorrelation  R(τ_lag) = σ²·exp(-|τ_lag|/τ)
+    regardless of the step size Δt (adapts to variable call intervals).
+
+    Parameters
+    ----------
+    mean : array-like, shape (3,)
+        Mean wind velocity [wx, wy, wz] in world frame [m/s].
+    std : float or array-like shape (3,)
+        Standard deviation of turbulent fluctuations per axis [m/s].
+        Scalar value is broadcast to all three axes.
+    corr_time : float
+        Integral time scale τ [s].  Eddy correlation time.
+        Rule of thumb: τ ≈ L_I / U_mean  (e.g. 28m / 8m/s ≈ 3.5s).
+    seed : int or None
+        Random seed for reproducibility.  Default: None (random).
+
+    Example
+    -------
+    >>> wind = TurbulentWind(mean=[3, 0, 0], std=[1.5, 0.6, 0.4],
+    ...                      corr_time=3.5, seed=42)
+    >>> w = wind.update(0.01, np.zeros(3))
+    """
+
+    def __init__(self, mean=np.array([3.0, 0.0, 0.0]),
+                 std=np.array([1.5, 0.6, 0.4]),
+                 corr_time=3.5,
+                 seed=None):
+
+        self._mean      = np.asarray(mean,  dtype=float)
+        self._std       = np.broadcast_to(np.asarray(std, dtype=float),
+                                          (3,)).copy()
+        self._corr_time = float(corr_time)
+        self._rng       = np.random.default_rng(seed)
+
+        # Current wind state; starts at mean
+        self._wind   = self._mean.copy()
+        self._last_t = None   # tracks previous call time for variable-dt support
+
+    def update(self, t, position):
+        """
+        Advance the Gauss-Markov process to time ``t`` and return the
+        current wind vector.
+
+        Parameters
+        ----------
+        t : float
+            Current simulation time [s].
+        position : array-like, shape (3,)
+            UAV world-frame position (unused; turbulence is spatially uniform).
+
+        Returns
+        -------
+        wind : np.ndarray, shape (3,)
+            Wind velocity [wx, wy, wz] [m/s].
+        """
+        if self._last_t is None:
+            # First call: initialise from steady-state distribution
+            self._wind   = self._mean + self._std * self._rng.standard_normal(3)
+            self._last_t = t
+            return self._wind.copy()
+
+        dt = t - self._last_t
+        if dt <= 0:
+            return self._wind.copy()
+
+        alpha     = np.exp(-dt / self._corr_time)
+        noise_std = np.sqrt(1.0 - alpha ** 2) * self._std
+
+        self._wind   = (self._mean
+                        + alpha * (self._wind - self._mean)
+                        + noise_std * self._rng.standard_normal(3))
+        self._last_t = t
+        return self._wind.copy()
+
+
 if __name__=="__main__":
     wind = ConstantWind(wx=1,wy=1,wz=1)
     print(wind.update(0,np.array([0,0,0])))

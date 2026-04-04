@@ -149,19 +149,80 @@ Additionally, please cite the specific controller implementations you use:
 
 ## Extended Features (AIAA 2026 Fork)
 
-This fork adds several physics-fidelity and estimation modules for benchmarking
-controllers under progressively more realistic conditions.
+This fork adds physics-fidelity modules, wind field models, and a unified
+configuration system for benchmarking controllers under realistic conditions.
 
 ### New Modules
 
 | Module | File | Description |
 |--------|------|-------------|
 | **LGVI Integrator** | `rotorpy/vehicles/multirotor.py` | Lie-group variational integrator (Lee-Leok-McClamroch) on SO(3) via Cayley map + implicit Newton solve.  Replaces RK45 for exact angular-momentum and SO(3) preservation. Translation uses Stormer-Verlet. |
+| **BEM Rotor Aero** | `rotorpy/vehicles/bem_rotor.py` | Blade-element momentum model (Davoudi et al.). Wind-sensitive thrust — increases tracking error 10-30%. |
 | **EKF INS** | `rotorpy/estimators/ekf_ins.py` | 15-state extended Kalman filter (Euler-angle parameterization). IMU propagation + MoCap correction. |
 | **UKF INS** | `rotorpy/estimators/ukf_ins.py` | Unscented Kalman filter, same 15-state Euler-angle formulation. Uses Merwe scaled sigma points via `filterpy`. |
 | **L-IEKF INS** | `rotorpy/estimators/liekf_ins.py` | Left-Invariant EKF on SE_2(3) x R^6. World-frame error convention; constant gravity block in the A matrix. |
 | **R-IEKF (EqF) INS** | `rotorpy/estimators/eqf_ins.py` | Right-Invariant EKF / Equivariant Filter. Body-frame error convention. |
+| **Turbulent Wind** | `rotorpy/wind/default_winds.py` | First-order Gauss-Markov (Ornstein-Uhlenbeck) colored-noise turbulence model. Configurable mean, std, correlation time. |
+| **CFD Wind** | `rotorpy/wind/cfd_wind.py` | van der Laan LES NetCDF wind field (NREL-5MW wake). Spatially and temporally varying 2D hub-height flow. |
 | **Estimator-in-the-loop** | `rotorpy/simulate.py` | `use_estimator=True` flag feeds estimated (not true) state to the controller, closing the estimation-control loop. |
+
+### Unified Configuration (`sim_config.py`)
+
+All simulation scripts share a single configuration system. Edit parameters at
+the top of each file — no command-line arguments needed:
+
+```python
+from sim_config import get_config, make_x0, make_wind, make_sensors, get_quad_params, NullEstimator
+
+cfg = get_config(
+    integrator  = 'lgvi',       # 'rk45' | 'lgvi'
+    aero        = 'std',        # 'std' | 'bem'
+    sim_rate    = 500,          # Hz
+    t_final     = 15.0,         # s
+    controller  = 'SE3',        # 'SE3' | 'Geo' | 'GeoAdaptive' | 'L1-Geo' | 'INDI'
+    estimator   = 'gt',         # 'gt' | 'liekf'
+    trajectory  = 'circular',   # 'circular' | 'hover' | 'lissajous'
+    radius      = 2.0,          # m
+    circle_freq = 0.2,          # Hz (0.2 = 5s per lap)
+    wind_mode   = 'constant',   # 'nowind' | 'constant' | 'turbulent' | 'cfd'
+    wind_vec    = [3.0, 0.0, 0.0],
+)
+```
+
+Global defaults live in `sim_config.py`; each script overrides only what it needs.
+
+### Wind Models
+
+| Mode | Description | Key Parameters |
+|------|-------------|----------------|
+| `nowind` | No disturbance | — |
+| `constant` | Uniform steady wind | `wind_vec = [wx, wy, wz]` m/s |
+| `turbulent` | Mean + Gauss-Markov colored noise | `turb_mean`, `turb_std`, `turb_tau` (correlation time) |
+| `cfd` | van der Laan LES wake field (NREL-5MW) | `cfd_file`, `cfd_wake` (downstream distance), `cfd_unit` ('R'/'D'/'m') |
+
+CFD wind example — UAV flying in near-wake:
+```python
+cfg = get_config(
+    wind_mode   = 'cfd',
+    cfd_file    = 'wind field/2019/case6_highTi_UWV_10min_bin1.nc',
+    cfd_wake    = 5.0,      # 5R = 315m downstream of turbine
+    cfd_unit    = 'R',      # R=63m (rotor radius), D=126m (diameter), m=metres
+)
+```
+
+### Single-Case Simulation (`run_single.py`)
+
+Quick simulation with configurable physics, controller, trajectory, and wind.
+Edit the `cfg = get_config(...)` block at the top, then run:
+
+```bash
+python run_single.py
+```
+
+Outputs:
+- `run_single_result.png` — 3D trajectory, tracking error, position components, rotor speeds
+- `run_single_result_cfd_wind.png` — (CFD only) global wake view + zoomed UAV region with wind field contour
+- `run_single_result_cfd_wind_ts.png` — (CFD only) wind time series experienced by UAV
 
 ### Full Benchmark (`benchmark_full.py`)
 
@@ -222,13 +283,26 @@ All cases: circular trajectory (r = 2 m), constant wind [3, 0, 0] m/s, T = 15 s.
    converge, but LGVI is 2-3x faster in wall-clock time due to its
    fixed-step nature (no adaptive step-size overhead).
 
-### Running the Benchmark
+### Comparison Scripts
 
+| Script | What it compares |
+|--------|-----------------|
+| `run_single.py` | Single configurable simulation with plots |
+| `benchmark_full.py` | 10-case x 5-controller full benchmark |
+| `test_lgvi.py` | RK45 vs LGVI integrator (SO(3) preservation, energy, speed) |
+| `test_ins_comparison.py` | EKF vs UKF vs L-IEKF vs R-IEKF closed-loop |
+| `test_lgvi_estimators.py` | LGVI + all 4 estimators at 500 Hz |
+| `test_eqf_closedloop.py` | EqF INS vs GT vs MoCap feedback |
+| `test_eqf_comparison.py` | EKF vs EqF wind estimation |
+| `test_cfd_wind.py` | SE3 across NoWind / Constant / Turbulent / CFD wake positions |
+| `test_bem_comparison.py` | Lumped vs BEM rotor model |
+
+Running the full benchmark:
 ```bash
 python benchmark_full.py
 ```
 
-Outputs:
+Outputs land in `results/benchmark/`:
 - `benchmark_summary.json` — machine-readable results
 - `benchmark_full_heatmap.png` — color-coded tracking-error matrix
 - `benchmark_full_bars.png` — per-controller bar charts
